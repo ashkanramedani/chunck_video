@@ -1,7 +1,8 @@
 import os
 import logging
+import random
 import sqlite3
-
+import unittest
 
 class Tools:
     def __init__(self) -> None:
@@ -14,9 +15,8 @@ class Tools:
         data = self.getAllInDir(path)
         result = []
         for i in data:
-            if os.path.isdir(i):
+            if os.path.isdir(f"{path}/{i}"):
                 result.append(i)
-
         return result
 
     def makeDir(self, path: str) -> bool:
@@ -40,7 +40,6 @@ class Tools:
 
     def __del__(self) -> None:
         logging.info('Tools Object is Deleted')
-
 
 class Sqlite:
     def __init__(self) -> None:
@@ -82,18 +81,16 @@ class Sqlite:
     def __del__(self):
         logging.info('Slite Object is Deleted')
 
-
 class Chunk:
     def __init__(self, config: dict) -> None:
         self._objTools = Tools()
         self._objSlite = Sqlite()
-        self.temporary_path = './project/temporary'
         self.video_path_file = config['video_path_file']
         self.storage_path = config['storage_path']
         self.result_path = config['result_path']
         self.chunk_size = config['chunk_size']
         self.listDirStorage = self._objTools.getDirList(self.storage_path)
-        self.testConfigFlag = self.testConfig()
+        self.testConfigFlag = self.TestConfig()
 
     def CreateTable(self) -> None:
         self._objSlite.CreateEmptyTable(
@@ -113,7 +110,7 @@ class Chunk:
             """
         )
 
-    def testConfig(self) -> bool:
+    def TestConfig(self) -> bool:
         flags = []
         flags_error = [
             "storage path is not existed."
@@ -132,23 +129,30 @@ class Chunk:
             logging.debug('Config is OK')
             return True
 
-    def MergeChunckVideo(self, fileName: str, parent_id):
-        chunked_list = self._objSlite.Select(f"""SELECT file_id, file_name, file_path, file_format, part_number, total_part from files WHERE file_name='{fileName}' and parent_id={parent_id};""")
-        # if len(chunked_list) > 0:
-        #     chunked_list = chunked_list
+    def MergeChunckVideo(self, fileName: str) -> None:
+        parent_id = self._objSlite.Select(f"""SELECT file_id from files WHERE file_name='{fileName}' and parent_id is NULL limit 1;""")
+        if len(parent_id) > 0:
+            parent_id = parent_id[0][0]
+
+        chunked_list = self._objSlite.Select(f"""SELECT file_id, file_name, file_path, file_format, part_number, total_part from files WHERE parent_id={parent_id};""")
 
         masterFile = f"{self.result_path}/{fileName}.mp4"
-
+        flg = None
         for i in chunked_list:
-            path = f"{i[2]}/{i[1]}-{i[4]} out of {i[5]}.{i[3]}"
-            with open(path, 'rb') as file:
-                content = file.read()
-            self._objTools.WriteFileDir(masterFile, content, "ab")
+            if flg is None:
+                flg = [False]*(i[5]+2)
+            if not flg[i[4]]:
+                if self._objTools.isExistedDir(f"{i[2]}/") == False or self._objTools.isExistedDir(f"{i[2]}/{i[1]}.{i[3]}") == False:
+                    continue
+                flg[i[4]] = True
 
-    def chunker_video(self) -> None:
+                path = f"{i[2]}/{i[1]}.{i[3]}"
+                with open(path, 'rb') as file:
+                    content = file.read()
+                self._objTools.WriteFileDir(masterFile, content, "ab")
+
+    def ChunkerVideo(self) -> None:
         if not self.testConfigFlag:
-            return
-        if not self._objTools.makeDir(self.temporary_path):
             return
 
         start_byte = 0
@@ -187,36 +191,45 @@ class Chunk:
             else:
                 video_chunked = content[start_byte:start_byte+remaining_size]
                 start_byte += remaining_size
-            data = {
-                'keys': ['file_name', 'file_path', 'file_size', 'file_format', 'part_number', 'total_part', 'parent_id'],
-                'values': [f'{fileName}', f'{self.temporary_path }', fileSize, f'{fileFormat}', part, totalPartNumber, parent_id]
-            }
-            self._objSlite.Insert(data, 'files')
 
-            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
-            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
-            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
+            cnt = 0
+            flg = [False]*len(self.listDirStorage)
+            while True:
+                rand = random.randint(0, len(self.listDirStorage)-1)
+                if not flg[rand]:
+                    flg[rand] = True
+                    self._objTools.WriteFileDir(self.storage_path + f"/{self.listDirStorage[rand]}" + f"/{fileName}-copy {cnt}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
+                    data = {
+                        'keys': ['file_name', 'file_path', 'file_size', 'file_format', 'part_number', 'total_part', 'parent_id'],
+                        'values': [f'{fileName}-copy {cnt}-{part} out of {totalPartNumber}', f'{self.storage_path+ f"/{self.listDirStorage[rand]}"}', fileSize, f'{fileFormat}', part, totalPartNumber, parent_id]
+                    }
+                    self._objSlite.Insert(data, 'files')
+                    cnt += 1
+                if cnt == 3:
+                    break
 
             part += 1
 
     def __del__(self) -> None:
         logging.info('Chunk Object is Deleted')
 
-
-config = {
-    "chunk_size": 2097152,
-    "video_path_file": "./project/videos/filim.mp4",
-    "storage_path": "./project/storage",
-    "result_path": "./project/result"
-}
-_objChunk = Chunk(config)
-# _objChunk.CreateTable()
-# _objChunk.chunker_video()
-_objChunk.MergeChunckVideo('filim', 33)
-
+class Test(unittest.TestCase):
+    def TestConfig(self):
+        pass
 
 if __name__ == '__main__':
     # set video path
-    vpath = 'project/videos/filim.mp4'
+    _objTools = Tools()
+    fileName = 'saba.mp4'
+    config = {
+        "chunk_size": 2097152,
+        "video_path_file": f"./project/videos/{fileName}",
+        "storage_path": "./project/storage",
+        "result_path": "./project/result"
+    }
 
-    # print(os.path.isdir(os.listdir('project/videos')[0]))
+    if _objTools.isExistedDir(config['video_path_file']):
+        _objChunk = Chunk(config)
+        # _objChunk.CreateTable()
+        _objChunk.ChunkerVideo()
+        _objChunk.MergeChunckVideo(fileName[:fileName.rindex('.')])
