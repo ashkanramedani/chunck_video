@@ -7,8 +7,17 @@ class Tools:
     def __init__(self) -> None:
         pass
 
-    def getDirList(self, path: str) -> list:
+    def getAllInDir(self, path: str) -> list:
         return os.listdir(path)
+
+    def getDirList(self, path: str) -> list:
+        data = self.getAllInDir(path)
+        result = []
+        for i in data:
+            if os.path.isdir(i):
+                result.append(i)
+
+        return result
 
     def makeDir(self, path: str) -> bool:
         if not self.isExistedDir(path):
@@ -24,11 +33,16 @@ class Tools:
                 return ind
         return -1
 
+    def WriteFileDir(self, path: str, data: any, format="wb") -> None:
+        video_chunked_file = open(path, format)
+        video_chunked_file.write(data)
+        video_chunked_file.close()
+
     def __del__(self) -> None:
         logging.info('Tools Object is Deleted')
 
 
-class Slite:
+class Sqlite:
     def __init__(self) -> None:
         self.conn = None
         self.dbPath = 'fileManager.db'
@@ -48,11 +62,13 @@ class Slite:
         curs.execute(query)
         return curs.fetchall()
 
-    def Insert(self, query: str) -> None:
+    def Insert(self, data: dict, table: str) -> None:
         if self.conn is None:
             self.Connect()
         curs = self.conn.cursor()
-        curs.execute(query)
+        keys = ",".join(data["keys"])
+        value = str(data["values"])[1:-1]
+        curs.execute(f'INSERT INTO {table} ({keys}) values ({value})')
         self.conn.commit()
 
     def CreateEmptyTable(self, tableExistedScript: str, createTableScript: str) -> None:
@@ -70,15 +86,16 @@ class Slite:
 class Chunk:
     def __init__(self, config: dict) -> None:
         self._objTools = Tools()
-        self._objSlite = Slite()
+        self._objSlite = Sqlite()
         self.temporary_path = './project/temporary'
         self.video_path_file = config['video_path_file']
         self.storage_path = config['storage_path']
         self.result_path = config['result_path']
         self.chunk_size = config['chunk_size']
+        self.listDirStorage = self._objTools.getDirList(self.storage_path)
         self.testConfigFlag = self.testConfig()
 
-    def CreateTable(self):
+    def CreateTable(self) -> None:
         self._objSlite.CreateEmptyTable(
 
             """DROP TABLE IF EXISTS "files";""",
@@ -95,6 +112,7 @@ class Chunk:
                 );
             """
         )
+
     def testConfig(self) -> bool:
         flags = []
         flags_error = [
@@ -114,6 +132,19 @@ class Chunk:
             logging.debug('Config is OK')
             return True
 
+    def MergeChunckVideo(self, fileName: str, parent_id):
+        chunked_list = self._objSlite.Select(f"""SELECT file_id, file_name, file_path, file_format, part_number, total_part from files WHERE file_name='{fileName}' and parent_id={parent_id};""")
+        # if len(chunked_list) > 0:
+        #     chunked_list = chunked_list
+
+        masterFile = f"{self.result_path}/{fileName}.mp4"
+
+        for i in chunked_list:
+            path = f"{i[2]}/{i[1]}-{i[4]} out of {i[5]}.{i[3]}"
+            with open(path, 'rb') as file:
+                content = file.read()
+            self._objTools.WriteFileDir(masterFile, content, "ab")
+
     def chunker_video(self) -> None:
         if not self.testConfigFlag:
             return
@@ -130,16 +161,16 @@ class Chunk:
         fileFormat = self.video_path_file[self.video_path_file.rindex(".")+1:]
         totalPartNumber = int(fileSize/self.chunk_size) + (0 if fileSize%self.chunk_size == 0 else 1)
 
-        self._objSlite.Insert(f"""
-            INSERT INTO files 
-            (file_name, file_path, file_size, file_format, part_number, total_part, parent_id) 
-            VALUES
-            ('{fileName}', '{filePath}', {fileSize},'{fileFormat}', NULL, NULL, NULL);
-        """)
+        data = {
+            'keys': ['file_name', 'file_path', 'file_size', 'file_format'],
+            'values': [f'{fileName}', f'{filePath}', fileSize, f'{fileFormat}']
+        }
+        self._objSlite.Insert(data, 'files')
 
         parent_id = self._objSlite.Select(f"""SELECT file_id from files WHERE file_name='{fileName}' and parent_id is NULL limit 1;""")
         if len(parent_id) > 0:
             parent_id = parent_id[0][0]
+
         # read video file
         with open(self.video_path_file, 'rb') as file:
             content = file.read()
@@ -156,17 +187,16 @@ class Chunk:
             else:
                 video_chunked = content[start_byte:start_byte+remaining_size]
                 start_byte += remaining_size
+            data = {
+                'keys': ['file_name', 'file_path', 'file_size', 'file_format', 'part_number', 'total_part', 'parent_id'],
+                'values': [f'{fileName}', f'{self.temporary_path }', fileSize, f'{fileFormat}', part, totalPartNumber, parent_id]
+            }
+            self._objSlite.Insert(data, 'files')
 
-            self._objSlite.Insert(f"""
-                INSERT INTO files
-                (file_name, file_path, file_size, file_format, part_number, total_part, parent_id)
-                VALUES
-                ('{fileName}', '{filePath}', {fileSize},'{fileFormat}', {part}, {totalPartNumber}, {parent_id});
-            """)
+            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
+            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
+            self._objTools.WriteFileDir(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", video_chunked)
 
-            video_chunked_file = open(self.temporary_path + f"/{fileName}-{part} out of {totalPartNumber}.{fileFormat}", "ab")
-            video_chunked_file.write(video_chunked)
-            video_chunked_file.close()
             part += 1
 
     def __del__(self) -> None:
@@ -181,9 +211,12 @@ config = {
 }
 _objChunk = Chunk(config)
 # _objChunk.CreateTable()
-_objChunk.chunker_video()
+# _objChunk.chunker_video()
+_objChunk.MergeChunckVideo('filim', 33)
 
 
 if __name__ == '__main__':
     # set video path
     vpath = 'project/videos/filim.mp4'
+
+    # print(os.path.isdir(os.listdir('project/videos')[0]))
